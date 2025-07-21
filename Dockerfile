@@ -17,4 +17,6 @@ VOLUME ["/data"]
 
 EXPOSE 80 443
 
-CMD ["node", "app.js"]
+COPY DayZWebService/entrypoint.sh .
+RUN chmod +x entrypoint.sh
+ENTRYPOINT ["entrypoint.sh"]
