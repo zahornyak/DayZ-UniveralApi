@@ -19,4 +19,4 @@ EXPOSE 80 443
 
 COPY DayZWebService/entrypoint.sh .
 RUN chmod +x entrypoint.sh
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/app/entrypoint.sh"]
