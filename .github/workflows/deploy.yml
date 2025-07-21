@@ -1,0 +1,30 @@
+ARG UAPI_VERSION=1.3.2
+ARG NODE_MAJOR=18
+
+FROM node:${NODE_MAJOR}-bookworm AS builder
+WORKDIR /src
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends git ca-certificates && \
+    git clone --depth 1 --branch ${UAPI_VERSION} \
+        https://github.com/DaemonForge/DayZ-UniveralApi.git repo
+WORKDIR /src/repo/DayZWebService
+# npm ci is faster & reproducible; --omit=dev = install prod‑only deps (npm v8+)
+RUN npm ci --omit=dev
+
+# ░░ Runtime – copy the ready app into a slim base
+FROM node:${NODE_MAJOR}-bookworm-slim
+LABEL org.opencontainers.image.source="https://github.com/DaemonForge/DayZ-UniveralApi"
+ENV NODE_ENV=production \
+    PORT=8443                        # app falls back to 8443 if not set :contentReference[oaicite:0]{index=0}
+WORKDIR /app
+COPY --from=builder /src/repo/DayZWebService .
+
+# Optional: keep config & certs on a named volume so they survive container restarts
+VOLUME ["/app/config", "/app/greenlock.d"]
+
+# HTTPS (default), plus ACME helper that listens on :80 when Let’s Encrypt is enabled
+EXPOSE 8443 80
+
+# The package.json already provides "npm start": "node app.js" :contentReference[oaicite:1]{index=1}
+CMD ["npm","start"]
