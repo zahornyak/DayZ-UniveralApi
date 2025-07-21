@@ -1,30 +1,48 @@
-ARG UAPI_VERSION=1.3.2
-ARG NODE_MAJOR=18
+name: Build and Push Docker Image
 
-FROM node:${NODE_MAJOR}-bookworm AS builder
-WORKDIR /src
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends git ca-certificates && \
-    git clone --depth 1 --branch ${UAPI_VERSION} \
-        https://github.com/DaemonForge/DayZ-UniveralApi.git repo
-WORKDIR /src/repo/DayZWebService
-# npm ci is faster & reproducible; --omit=dev = install prod‑only deps (npm v8+)
-RUN npm ci --omit=dev
+on:
+  push:
+    branches: [ main ]
 
-# ░░ Runtime – copy the ready app into a slim base
-FROM node:${NODE_MAJOR}-bookworm-slim
-LABEL org.opencontainers.image.source="https://github.com/DaemonForge/DayZ-UniveralApi"
-ENV NODE_ENV=production \
-    PORT=8443                        # app falls back to 8443 if not set :contentReference[oaicite:0]{index=0}
-WORKDIR /app
-COPY --from=builder /src/repo/DayZWebService .
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
-# Optional: keep config & certs on a named volume so they survive container restarts
-VOLUME ["/app/config", "/app/greenlock.d"]
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
-# HTTPS (default), plus ACME helper that listens on :80 when Let’s Encrypt is enabled
-EXPOSE 8443 80
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-# The package.json already provides "npm start": "node app.js" :contentReference[oaicite:1]{index=1}
-CMD ["npm","start"]
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short
+            latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
