@@ -4,7 +4,7 @@ WORKDIR /app
 COPY DayZWebService/package*.json DayZWebService/
 
 WORKDIR /app/DayZWebService
-RUN npm ci --production
+RUN npm ci
 
 COPY DayZWebService/ /app/DayZWebService/
 
