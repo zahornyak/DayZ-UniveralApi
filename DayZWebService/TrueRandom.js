@@ -8,6 +8,57 @@ const router = Router();
 
 router.use(GenerateLimiter(global.config.RequestLimitToxicity || 200, 10));
 
+// QRNG request helpers to ensure we never try to JSON-parse HTML error pages
+const DEFAULT_QRNG_TIMEOUT_MS = 10000;
+
+function sleep(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchQrngJson(url, { timeoutMs = DEFAULT_QRNG_TIMEOUT_MS } = {}){
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, {
+            signal: controller.signal,
+            headers: { 'accept': 'application/json' },
+        });
+        const contentType = response.headers.get('content-type') || '';
+        if (!response.ok){
+            const body = await response.text().catch(() => '');
+            throw new Error(`QRNG HTTP ${response.status} ${response.statusText}${body ? `: ${body.substring(0,120)}` : ''}`);
+        }
+        if (!contentType.toLowerCase().includes('application/json')){
+            const body = await response.text().catch(() => '');
+            throw new Error(`QRNG non-JSON response (${contentType})${body ? `: ${body.substring(0,120)}` : ''}`);
+        }
+        return await response.json();
+    } catch (err){
+        if (err && err.name === 'AbortError'){
+            throw new Error('QRNG request timed out');
+        }
+        throw err;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function fetchQrngJsonWithRetries(url, retries = 2){
+    let lastError;
+    for (let attempt = 0; attempt <= retries; attempt++){
+        try {
+            return await fetchQrngJson(url);
+        } catch (e){
+            lastError = e;
+            if (attempt < retries){
+                await sleep(500 * (attempt + 1));
+                continue;
+            }
+        }
+    }
+    throw lastError;
+}
+
 /**
  *  Quantum Random Number Generator 0 to 65535
  *  Post: /Random
@@ -57,14 +108,12 @@ async function GetRandom(req, res, auth){
             let ints = []; //I know I could Impove this but meh it works and yeah
             if (count > 1024){
                 count = count - 1024
-                let resJson2 = await fetch(`https://qrng.anu.edu.au/API/jsonI.php?length=1024&type=uint16`)
-                let data2 = await resJson2.json();
+                let data2 = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=1024&type=uint16`);
                 if (data2.success){
                     ints = ints.concat(data2.data);
                 }
             }
-            let resJson = await fetch(`https://qrng.anu.edu.au/API/jsonI.php?length=${count}&type=uint16`)
-            let data = await resJson.json();
+            let data = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=${count}&type=uint16`);
             if (data.success){
                 ints = ints.concat(data.data);
                 log("Random numbers requested");
@@ -103,14 +152,12 @@ async function GetFullRandom(req, res, auth){
 
             if (count > 2048){
                 count = count - 2048
-                let resJson2 = await fetch(`https://qrng.anu.edu.au/API/jsonI.php?length=1024&type=hex16&size=8`)
-                let data2 = await resJson2.json();
+                let data2 = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=1024&type=hex16&size=8`);
                 if (data2.success){
                     hexs = hexs.concat(data2.data);
                 }
             }
-            let resJson = await fetch(`https://qrng.anu.edu.au/API/jsonI.php?length=${Math.ceil(count/2)}&type=hex16&size=8`)
-            let data = await resJson.json();
+            let data = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=${Math.ceil(count/2)}&type=hex16&size=8`);
             if (data.success){
                 hexs = hexs.concat(data.data);
                 hexs.forEach(e => {
