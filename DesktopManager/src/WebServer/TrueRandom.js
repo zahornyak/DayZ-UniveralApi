@@ -1,4 +1,5 @@
 const {Router} = require('express');
+const crypto = require('crypto');
 const log = require("./log");
 const {isArray,GenerateLimiter} = require('./utils');
 
@@ -10,6 +11,8 @@ router.use(GenerateLimiter(global.config.RequestLimitToxicity || 200, 10));
 
 // QRNG request helpers to ensure we never try to JSON-parse HTML error pages
 const DEFAULT_QRNG_TIMEOUT_MS = 10000;
+const QRNG_CALL_INTERVAL_MS = 60000; // ANU free API is 1 request/min
+let lastQrngCallMs = 0;
 
 function sleep(ms){
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -47,6 +50,11 @@ async function fetchQrngJsonWithRetries(url, retries = 2){
     let lastError;
     for (let attempt = 0; attempt <= retries; attempt++){
         try {
+            const now = Date.now();
+            if (now - lastQrngCallMs < QRNG_CALL_INTERVAL_MS){
+                throw new Error('QRNG local throttle: only 1 request per minute allowed');
+            }
+            lastQrngCallMs = now;
             return await fetchQrngJson(url);
         } catch (e){
             lastError = e;
@@ -57,6 +65,24 @@ async function fetchQrngJsonWithRetries(url, retries = 2){
         }
     }
     throw lastError;
+}
+
+function generatePseudoUint16(count){
+    const buffer = crypto.randomBytes(count * 2);
+    const result = new Array(count);
+    for (let i = 0; i < count; i++){
+        result[i] = buffer.readUInt16LE(i * 2);
+    }
+    return result;
+}
+
+function generatePseudoInt32(count){
+    const buffer = crypto.randomBytes(count * 4);
+    const result = new Array(count);
+    for (let i = 0; i < count; i++){
+        result[i] = buffer.readInt32LE(i * 4);
+    }
+    return result;
 }
 
 /**
@@ -108,14 +134,30 @@ async function GetRandom(req, res, auth){
             let ints = []; //I know I could Impove this but meh it works and yeah
             if (count > 1024){
                 count = count - 1024
-                let data2 = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=1024&type=uint16`);
-                if (data2.success){
-                    ints = ints.concat(data2.data);
+                try {
+                    let data2 = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=1024&type=uint16`);
+                    if (data2.success){
+                        ints = ints.concat(data2.data);
+                    } else {
+                        ints = ints.concat(generatePseudoUint16(1024));
+                    }
+                } catch (err){
+                    log(`QRNG fetch (uint16 x1024) failed, using pseudo fallback: ${err}`, 'warn');
+                    ints = ints.concat(generatePseudoUint16(1024));
                 }
             }
-            let data = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=${count}&type=uint16`);
-            if (data.success){
-                ints = ints.concat(data.data);
+            try {
+                let data = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=${count}&type=uint16`);
+                if (data.success){
+                    ints = ints.concat(data.data);
+                } else {
+                    ints = ints.concat(generatePseudoUint16(count));
+                }
+            } catch (err){
+                log(`QRNG fetch (uint16 x${count}) failed, using pseudo fallback: ${err}`, 'warn');
+                ints = ints.concat(generatePseudoUint16(count));
+            }
+            if (ints && ints.length === RawCount){
                 log("Random numbers requested");
                 res.status(200);
                 res.json({Status: "Success", Error: ``, Numbers: ints });
@@ -152,25 +194,42 @@ async function GetFullRandom(req, res, auth){
 
             if (count > 2048){
                 count = count - 2048
-                let data2 = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=1024&type=hex16&size=8`);
-                if (data2.success){
-                    hexs = hexs.concat(data2.data);
+                try {
+                    let data2 = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=1024&type=hex16&size=8`);
+                    if (data2.success){
+                        hexs = hexs.concat(data2.data);
+                    } else {
+                        ints = ints.concat(generatePseudoInt32(2048));
+                    }
+                } catch (err){
+                    log(`QRNG fetch (hex16 x1024) failed, using pseudo fallback: ${err}`, 'warn');
+                    ints = ints.concat(generatePseudoInt32(2048));
                 }
             }
-            let data = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=${Math.ceil(count/2)}&type=hex16&size=8`);
-            if (data.success){
-                hexs = hexs.concat(data.data);
-                hexs.forEach(e => {
-                    ints = ints.concat(ConvertToInts(e));
-                });
-                log("Random numbers requested");
-                res.status(200);
-                res.json({Status: "Success", Error: ``, Numbers: ints });
-            } else {
-                res.status(203)
-                log("Failed to generate random numbers due to error from qrng servers", "warn");
-                res.json({Status: "Error", Error: `Error in request`,  });
+            try {
+                let data = await fetchQrngJsonWithRetries(`https://qrng.anu.edu.au/API/jsonI.php?length=${Math.ceil(count/2)}&type=hex16&size=8`);
+                if (data.success){
+                    hexs = hexs.concat(data.data);
+                } else {
+                    ints = ints.concat(generatePseudoInt32(count));
+                }
+            } catch (err){
+                log(`QRNG fetch (hex16 x${Math.ceil(count/2)}) failed, using pseudo fallback: ${err}`, 'warn');
+                ints = ints.concat(generatePseudoInt32(count));
             }
+            // Convert fetched hexs to ints
+            hexs.forEach(e => { ints = ints.concat(ConvertToInts(e)); });
+
+            // Ensure we return exactly the requested amount
+            if (ints.length > RawCount){
+                ints = ints.slice(0, RawCount);
+            } else if (ints.length < RawCount){
+                ints = ints.concat(generatePseudoInt32(RawCount - ints.length));
+            }
+
+            log("Random numbers requested");
+            res.status(200);
+            res.json({Status: "Success", Error: ``, Numbers: ints });
         } catch (e){
             console.log(e)
             log(e, "warn")
